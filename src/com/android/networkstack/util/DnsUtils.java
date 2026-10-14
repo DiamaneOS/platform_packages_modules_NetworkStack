@@ -50,7 +50,7 @@ public class DnsUtils {
     public static final int TYPE_ADDRCONFIG = -1;
     // A one time host name suffix of private dns probe.
     // q.v. system/netd/server/dns/DnsTlsTransport.cpp
-    public static final String PRIVATE_DNS_PROBE_HOST_SUFFIX_GRAPHENEOS = "-dnsotls-ds.dnscheck.grapheneos.org";
+    public static final String PRIVATE_DNS_PROBE_HOST_SUFFIX_GRAPHENEOS = "-dnsotls-ds.dnscheck.diamaneos.de";
     public static final String PRIVATE_DNS_PROBE_HOST_SUFFIX_DEFAULT = PRIVATE_DNS_PROBE_HOST_SUFFIX_GRAPHENEOS;
     // renamed from PRIVATE_DNS_PROBE_HOST_SUFFIX to make sure compilation breaks if it's used
     // in more places
