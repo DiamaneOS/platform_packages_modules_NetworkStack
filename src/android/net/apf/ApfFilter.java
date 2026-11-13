@@ -529,6 +529,21 @@ public class ApfFilter {
 
     // Our IPv4 address, if we have just one, otherwise null.
     private byte[] mIPv4Address;
+    // How long ARP requests pass while the interface has no IPv4 address. DHCP normally gives one
+    // within seconds, and until the filter knows it, a request for it must not be dropped. Without
+    // a limit, a network that never gives an address keeps every ARP request of the link coming
+    // through, and each one wakes the device, for as long as the connection lasts.
+    @VisibleForTesting
+    public static final long ARP_REQUEST_WITHOUT_IPV4_GRACE_MS = 60_000;
+    // elapsedRealtime of the moment the interface was last seen to be without an IPv4 address.
+    private long mIPv4AddressMissingSinceMs;
+    // Installs the program again once the grace period is over. The delay counts awake time only.
+    // A device that sleeps through it gets the new rule with the next program it installs.
+    private final Runnable mArpRequestGraceEnded = () -> {
+        if (!this.mIsApfShutdown && this.mIPv4Address == null) {
+            installNewProgram();
+        }
+    };
     // The subnet prefix length of our IPv4 network. Only valid if mIPv4Address is not null.
     private int mIPv4PrefixLength;
 
@@ -636,6 +651,7 @@ public class ApfFilter {
         mIpClientRaInfoMetrics = dependencies.getIpClientRaInfoMetrics();
         mApfSessionInfoMetrics = dependencies.getApfSessionInfoMetrics();
         mSessionStartMs = dependencies.elapsedRealtime();
+        mIPv4AddressMissingSinceMs = mSessionStartMs;
         mMinMetricsSessionDurationMs = config.minMetricsSessionDurationMs;
         mHasClat = config.hasClatInterface;
 
@@ -658,6 +674,7 @@ public class ApfFilter {
         maybeCleanUpApfRam();
         // Install basic filters
         installNewProgram();
+        mHandler.postDelayed(mArpRequestGraceEnded, ARP_REQUEST_WITHOUT_IPV4_GRACE_MS);
 
         mRaPacketReader = new RaPacketReader(mHandler, mInterfaceParams.index);
         // The class constructor must be called from the IpClient's handler thread
@@ -2081,6 +2098,8 @@ public class ApfFilter {
         //   if interface has IPv4 address
         //     if target ip is not the interface ip
         //       drop
+        //   else if it has had none for longer than the grace period
+        //     drop
         //   pass
 
         // For IPv6 only network, drop all ARP packet.
@@ -2150,6 +2169,13 @@ public class ApfFilter {
                         .addTransmitWithoutChecksum()
                         .addCountAndDrop(DROPPED_ARP_REQUEST_REPLIED);
             }
+        } else if (mDependencies.elapsedRealtime() - mIPv4AddressMissingSinceMs
+                >= ARP_REQUEST_WITHOUT_IPV4_GRACE_MS) {
+            // No IPv4 address for longer than DHCP takes, so no ARP request on this link is for
+            // us. ARP replies are handled above and still pass, which is what the DHCP client's
+            // address conflict check listens for.
+            gen.addCountAndDrop(DROPPED_ARP_OTHER_HOST);
+            return;
         }
         // If we're not clat, and we don't have an ipv4 address, allow all ARP request to avoid
         // racing against DHCP.
@@ -4032,7 +4058,8 @@ public class ApfFilter {
      * <ul>
      * <li>Drop/Pass 802.3 frames (based on policy)
      * <li>Drop packets with EtherType within the Black List
-     * <li>Drop ARP requests not for us, if mIPv4Address is set,
+     * <li>Drop ARP requests not for us, if mIPv4Address is set, and all ARP requests once the
+     *     interface has been without an IPv4 address for longer than the grace period,
      * <li>Drop IPv4 broadcast packets, except DHCP destined to our MAC,
      * <li>Drop IPv4 multicast packets, if mMulticastFilter,
      * <li>Pass all other IPv4 packets,
@@ -4695,6 +4722,7 @@ public class ApfFilter {
             mLowPowerStandbyPortsSubscriber.unsubscribe();
         }
         mIsApfShutdown = true;
+        mHandler.removeCallbacks(mArpRequestGraceEnded);
         if (SdkLevel.isAtLeastV()) {
             if (mApfMdnsReplyOffloadEngine != null) {
                 mApfMdnsReplyOffloadEngine.unregisterOffloadEngine();
@@ -4783,6 +4811,12 @@ public class ApfFilter {
         }
         if (isValidMtu) {
             mInterfaceMtu = newMtu;
+        }
+        if (addr == null && mIPv4Address != null) {
+            // The address went away. A new one may be on its way, so the grace period starts again.
+            mIPv4AddressMissingSinceMs = mDependencies.elapsedRealtime();
+            mHandler.removeCallbacks(mArpRequestGraceEnded);
+            mHandler.postDelayed(mArpRequestGraceEnded, ARP_REQUEST_WITHOUT_IPV4_GRACE_MS);
         }
         mIPv4Address = addr;
         mIPv4PrefixLength = prefix;
@@ -5041,7 +5075,10 @@ public class ApfFilter {
         try {
             pw.println("IPv4 address: " + InetAddress.getByAddress(mIPv4Address).getHostAddress());
         } catch (UnknownHostException | NullPointerException e) {
-            pw.println("IPv4 address: None");
+            final boolean dropped = mDependencies.elapsedRealtime() - mIPv4AddressMissingSinceMs
+                    >= ARP_REQUEST_WITHOUT_IPV4_GRACE_MS;
+            pw.println("IPv4 address: None (ARP requests "
+                    + (dropped ? "are dropped" : "pass during the grace period") + ")");
         }
 
         pw.println("IPv4 multicast addresses:");

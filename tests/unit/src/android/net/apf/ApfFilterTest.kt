@@ -4558,6 +4558,61 @@ class ApfFilterTest {
     }
 
     @Test
+    fun testArpFilterDropRequestsNoIPv4AfterGracePeriod() {
+        val apfFilter = getApfFilter()
+        ApfTestHelpers.consumeInstalledProgram(apfController, installCnt = 2)
+        // Using scapy to generate ARP request packet:
+        // eth = Ether(src="00:01:02:03:04:05", dst="FF:FF:FF:FF:FF:FF")
+        // arp = ARP(op=1, pdst="1.2.3.4")
+        // pkt = eth/arp
+        val arpRequestPkt = HexDump.hexStringToByteArray(
+            "ffffffffffff000102030405080600010800060400015c857e3c74e1c0a8012200000000000001020304"
+        )
+        // Using scapy to generate unicast ARP reply packet:
+        // eth = Ether(src="00:01:02:03:04:05", dst="01:02:03:04:05:06")
+        // arp = ARP(op=2, psrc="1.2.3.4")
+        // pkt = eth/arp
+        val nonBcastArpReplyPkt = HexDump.hexStringToByteArray(
+            "010203040506000102030405080600010800060400025c857e3c74e10102030400000000000000000000"
+        )
+
+        // Still no IPv4 address when the grace period ends: ARP requests are dropped. ARP replies
+        // keep passing.
+        val start = dependencies.elapsedRealtime()
+        doReturn(start + ApfFilter.ARP_REQUEST_WITHOUT_IPV4_GRACE_MS)
+                .`when`(dependencies).elapsedRealtime()
+        visibleOnHandlerThread(handler) { apfFilter.installNewProgram() }
+        var program = ApfTestHelpers.consumeInstalledProgram(apfController, installCnt = 1)
+        ApfTestHelpers.verifyProgramRun(
+            apfInterpreterVersion,
+            program,
+            arpRequestPkt,
+            DROPPED_ARP_OTHER_HOST
+        )
+        ApfTestHelpers.verifyProgramRun(
+            apfInterpreterVersion,
+            program,
+            nonBcastArpReplyPkt,
+            PASSED_ARP_UNICAST_REPLY
+        )
+
+        // An address arrives and goes away again: the grace period starts again, so ARP requests
+        // pass.
+        val lp = LinkProperties()
+        lp.addLinkAddress(LinkAddress(InetAddress.getByAddress(hostIpv4Address), 24))
+        visibleOnHandlerThread(handler) { apfFilter.setLinkProperties(lp) }
+        ApfTestHelpers.consumeInstalledProgram(apfController, installCnt = 1)
+        visibleOnHandlerThread(handler) { apfFilter.setLinkProperties(LinkProperties()) }
+        program = ApfTestHelpers.consumeInstalledProgram(apfController, installCnt = 1)
+        ApfTestHelpers.verifyProgramRun(
+            apfInterpreterVersion,
+            program,
+            arpRequestPkt,
+            PASSED_ARP_REQUEST
+        )
+    }
+
+    @Test
     fun testArpFilterDropPktsWithIPv4() {
         val apfFilter = getApfFilter()
         ApfTestHelpers.consumeInstalledProgram(apfController, installCnt = 2)
